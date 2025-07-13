@@ -1,142 +1,119 @@
 import os
-import threading
-from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ConversationHandler, ContextTypes
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes, ConversationHandler, MessageHandler, filters
 import smtplib
 from email.mime.text import MIMEText
 from fastapi import FastAPI
 import uvicorn
+import threading
 
-# Carica .env
-load_dotenv()
-
-# Variabili ambiente
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
-EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
-RECEIVER_EMAIL = os.getenv("RECEIVER_EMAIL")
-
-# FastAPI per /health
+# ========== FastAPI per l'endpoint /health ==========
 fastapi_app = FastAPI()
 
 @fastapi_app.get("/health")
 def health():
     return {"status": "ok"}
 
-# Prodotti disponibili
+# ========== Bot Telegram ==========
+CHOOSING_PRODUCT, CHOOSING_QTY, CHOOSING_DETAILS, CONFIRMING = range(4)
+
 products = {
     'cuffie': 'Cuffie Wireless Modello X',
     'maglia': 'Maglia Calcio Retrò',
     'sneakers': 'Sneakers Streetwear Edition'
 }
-
 order = {}
-CHOOSING_PRODUCT, CHOOSING_QTY, CHOOSING_DETAILS, CONFIRMING = range(4)
 
-# ----- BOT HANDLERS -----
+SMTP_SERVER = 'smtp.gmail.com'
+SMTP_PORT = 587
+EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
+EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
+RECEIVER_EMAIL = os.getenv("RECEIVER_EMAIL")
+TELEGRAM_TOKEN = os.getenv("BOT_TOKEN")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [[InlineKeyboardButton(name, callback_data=key)] for key, name in products.items()]
-    await update.message.reply_text("Benvenuto su FastReseller Bot! Scegli un prodotto da ordinare:", reply_markup=InlineKeyboardMarkup(keyboard))
+    keyboard = [[InlineKeyboardButton(products[key], callback_data=key)] for key in products]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text('Benvenuto su FastReseller Bot! Scegli un prodotto:', reply_markup=reply_markup)
     return CHOOSING_PRODUCT
 
 async def choose_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    order['product'] = products[query.data]
+    product_key = query.data
+    order['product'] = products[product_key]
     await query.edit_message_text(f"Hai scelto: {order['product']}\nQuante unità vuoi ordinare?")
     return CHOOSING_QTY
 
 async def choose_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    if not text.isdigit() or int(text) < 1:
-        await update.message.reply_text("Inserisci un numero valido.")
+    qty_text = update.message.text
+    if not qty_text.isdigit():
+        await update.message.reply_text("Per favore, inserisci un numero valido.")
         return CHOOSING_QTY
-    order['quantity'] = int(text)
-    await update.message.reply_text("Inserisci indirizzo o dettagli per la spedizione:")
+    order['quantity'] = int(qty_text)
+    await update.message.reply_text("Inserisci eventuali dettagli o indirizzo di spedizione:")
     return CHOOSING_DETAILS
 
 async def choose_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
     order['details'] = update.message.text
-    await update.message.reply_text(
+    summary = (
         f"Riepilogo ordine:\n"
-        f"📦 Prodotto: {order['product']}\n"
-        f"🔢 Quantità: {order['quantity']}\n"
-        f"📍 Dettagli: {order['details']}\n"
-        "Confermi l'ordine? (si/no)"
+        f"Prodotto: {order['product']}\n"
+        f"Quantità: {order['quantity']}\n"
+        f"Dettagli: {order['details']}\n\n"
+        f"Confermi l'ordine? (si/no)"
     )
+    await update.message.reply_text(summary)
     return CONFIRMING
 
 async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.text.lower() == "si":
-        send_email(order)
-        await update.message.reply_text("✅ Ordine ricevuto! Ti contatteremo al più presto.")
+    if update.message.text.lower() == 'si':
+        send_order_email(order)
+        await update.message.reply_text("Ordine ricevuto! Ti contatteremo presto.")
+        order.clear()
+        return ConversationHandler.END
     else:
-        await update.message.reply_text("❌ Ordine annullato.")
-    order.clear()
-    return ConversationHandler.END
+        await update.message.reply_text("Ordine annullato.")
+        order.clear()
+        return ConversationHandler.END
 
-def send_email(order):
-    msg = MIMEText(
+def send_order_email(order):
+    body = (
         f"Nuovo ordine:\n\n"
         f"Prodotto: {order['product']}\n"
         f"Quantità: {order['quantity']}\n"
         f"Dettagli: {order['details']}"
     )
-    msg['Subject'] = 'Nuovo Ordine FastReseller'
+    msg = MIMEText(body)
+    msg['Subject'] = 'Nuovo ordine FastReseller'
     msg['From'] = EMAIL_ADDRESS
     msg['To'] = RECEIVER_EMAIL
+
     try:
-        with smtplib.SMTP("smtp.gmail.com", 587) as server:
-            server.starttls()
-            server.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
-            server.send_message(msg)
-        print("Email inviata!")
+        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
+        server.starttls()
+        server.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+        server.sendmail(EMAIL_ADDRESS, RECEIVER_EMAIL, msg.as_string())
+        server.quit()
     except Exception as e:
-        print("Errore invio email:", e)
-
-# Altri comandi
-async def catalogo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    lista = "\n".join([f"- {v}" for v in products.values()])
-    await update.message.reply_text(f"Ecco il catalogo prodotti:\n{lista}")
-
-async def contatti(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📧 Email: fastreseller10@gmail.com\n📱 Instagram: @fastreseller\n🌐 Sito: fast-reseller.vercel.app")
-
-async def aiuto(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Usa i comandi per esplorare il catalogo e fare ordini:\n/start - Menu\n/catalogo - Tutti i prodotti\n/ordina - Ordina ora")
-
-async def info(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("FastReseller è il tuo shop di fiducia per prodotti tech, streetwear, profumi e molto altro! 🌟")
-
-def run_web():
-    port = int(os.getenv("PORT", 8000))
-    uvicorn.run(fastapi_app, host="0.0.0.0", port=port)
+        print(f"Errore invio email: {e}")
 
 def run_bot():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-
     conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("ordina", start)],
+        entry_points=[CommandHandler('start', start)],
         states={
             CHOOSING_PRODUCT: [CallbackQueryHandler(choose_product)],
             CHOOSING_QTY: [MessageHandler(filters.TEXT & ~filters.COMMAND, choose_qty)],
             CHOOSING_DETAILS: [MessageHandler(filters.TEXT & ~filters.COMMAND, choose_details)],
-            CONFIRMING: [MessageHandler(filters.TEXT & ~filters.COMMAND, confirm_order)],
+            CONFIRMING: [MessageHandler(filters.TEXT & ~filters.COMMAND, confirm_order)]
         },
         fallbacks=[]
     )
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("catalogo", catalogo))
-    app.add_handler(CommandHandler("contatti", contatti))
-    app.add_handler(CommandHandler("aiuto", aiuto))
-    app.add_handler(CommandHandler("info", info))
     app.add_handler(conv_handler)
-
     app.run_polling()
 
+# ========== Avvio multiplo: bot + fastapi ==========
 if __name__ == "__main__":
-    threading.Thread(target=run_web).start()
-    run_bot()
+    threading.Thread(target=run_bot).start()
+    uvicorn.run(fastapi_app, host="0.0.0.0", port=10000)
